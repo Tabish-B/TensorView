@@ -1,0 +1,73 @@
+name: Test and build TensorView
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install CPU PyTorch on Windows and Linux
+        if: runner.os != 'macOS'
+        run: python -m pip install "torch>=2.6,<3" --index-url https://download.pytorch.org/whl/cpu
+      - name: Install TensorView and development dependencies
+        run: python -m pip install -e ".[torch,scientific,embeddings,dev]"
+      - run: ruff check .
+      - run: python -m pytest
+      - name: Build desktop application
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        run: python -m PyInstaller --noconfirm packaging/TensorView.spec
+      - name: Verify macOS or Linux application
+        if: runner.os != 'Windows' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+        shell: bash
+        run: |
+          executable=dist/TensorView/TensorView
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            executable=dist/TensorView.app/Contents/MacOS/TensorView
+          fi
+          result="$RUNNER_TEMP/tensorview-check.txt"
+          "$executable" --verify-package "$result" || { cat "$result"; exit 1; }
+          cat "$result"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            codesign --verify --deep --strict dist/TensorView.app
+          fi
+      - name: Verify Windows application
+        if: runner.os == 'Windows' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+        shell: pwsh
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP "tensorview-check.txt"
+          $argument = '"' + $result + '"'
+          $process = Start-Process -FilePath dist/TensorView/TensorView.exe -ArgumentList @("--verify-package", $argument) -Wait -PassThru
+          Get-Content $result
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+      - name: Archive macOS app
+        if: runner.os == 'macOS' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+        run: ditto -c -k --sequesterRsrc --keepParent dist/TensorView.app TensorView-macOS.zip
+      - name: Archive Linux app
+        if: runner.os == 'Linux' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+        run: tar -C dist -czf TensorView-Linux.tar.gz TensorView
+      - name: Archive Windows app
+        if: runner.os == 'Windows' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+        run: Compress-Archive -Path dist/TensorView -DestinationPath TensorView-Windows.zip
+      - name: Upload app archive
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: TensorView-${{ runner.os }}
+          path: |
+            TensorView-*.zip
+            TensorView-*.tar.gz
+          if-no-files-found: error

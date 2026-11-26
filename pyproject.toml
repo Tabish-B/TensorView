@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tensorview"
+version = "1.0.0"
+description = "A local desktop workbench for tensors and machine learning checkpoints"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = "MIT"
+dependencies = [
+    "numpy>=1.26,<3",
+    "safetensors>=0.5,<1",
+    "ml-dtypes>=0.5,<1",
+
+    "PySide6-Essentials>=6.7,<7",
+    "pyqtgraph>=0.13.7,<1",
+]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.6,<3"]
+scientific = ["scipy>=1.13,<2", "h5py>=3.11,<4", "onnx>=1.20,<2"]
+embeddings = ["scikit-learn>=1.5,<2", "umap-learn>=0.5.7,<1"]
+dev = ["pytest>=8,<10", "ruff>=0.9,<1", "PyInstaller>=6.11,<7"]
+
+[project.scripts]
+tensorview = "tensorview.__main__:main"
+[project.gui-scripts]
+tensorview-desktop = "tensorview.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["tensorview*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
