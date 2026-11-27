@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import copy_metadata
 
 root = Path(SPECPATH).parent
 assets = root / "packaging"
-icon = assets / ("TensorView.icns" if platform == "darwin" else "TensorView.png")
+icon = assets / ("TensorView.icns" if platform == "darwin" else "TensorView.ico")
 analysis = Analysis(
     [str(assets / "launch.py")],
     pathex=[str(root)],
