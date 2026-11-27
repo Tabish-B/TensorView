@@ -72,7 +72,44 @@ def test_comparison_distinguishes_nearby_wide_integers():
     assert result.changed_values == 1
     assert result.max_absolute == pytest.approx(1)
     c = array_tensor("c", np.array([float(2**63)], dtype="float64"))
-    assert compare_tensor("a", a, c).changed_values == 1
+    mixed = compare_tensor("a", a, c)
+    assert mixed.changed_values == 1
+    assert mixed.max_absolute == pytest.approx(1)
+    signed = array_tensor("signed", np.array([2**63 - 1, -2], dtype=np.int64))
+    unsigned = array_tensor("unsigned", np.array([2**63, 3], dtype=np.uint64))
+    assert compare_tensor("mixed", signed, unsigned).mean_absolute == pytest.approx(3)
+
+
+def test_distance_uses_independent_scales_across_blocks():
+    left = np.zeros(262_145)
+    right = np.zeros_like(left)
+    left[0] = 1e-200
+    right[-1] = 1
+    result = compare_tensor("a", array_tensor("a", left), array_tensor("a", right))
+    assert result.cosine == 0
+    assert result.relative_l2 == pytest.approx(1e200)
+    assert result.max_absolute == pytest.approx(1)
+    backward = compare_tensor("a", array_tensor("a", right), array_tensor("a", left))
+    assert backward.relative_l2 == pytest.approx(1)
+    assert backward.cosine == 0
+
+
+def test_distance_with_subnormal_complex_values():
+    a = array_tensor("a", np.array([complex(2e-310, 1e-310)]))
+    b = array_tensor("b", np.array([complex(1e-310, 2e-310)]))
+    result = compare_tensor("a", a, b)
+    assert result.relative_l2 == pytest.approx((2 / 5) ** 0.5)
+    assert result.cosine == pytest.approx(0.8)
+    assert result.max_absolute == pytest.approx(2**0.5 * 1e-310, abs=0)
+
+
+def test_distance_when_absolute_difference_overflows():
+    a = array_tensor("a", np.array([1.7e308]))
+    b = array_tensor("b", np.array([-1.7e308]))
+    result = compare_tensor("a", a, b)
+    assert result.max_absolute == np.inf
+    assert result.relative_l2 == pytest.approx(2)
+    assert result.cosine == pytest.approx(-1)
 
 
 def test_validation_and_nested_example_comparison():

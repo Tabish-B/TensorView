@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tensorview.analysis import statistics
 from tensorview.exporting import TENSOR_EXPORTS, export_report, export_tensor
 from tensorview.loaders import open_file
 from tensorview.model import TensorViewError, array_tensor
@@ -80,6 +81,20 @@ def test_hdf5_and_matlab_v73(tmp_path):
     np.testing.assert_array_equal(mat.tensors["x"].read((1, slice(None), slice(None))), source[1])
 
 
+def test_matlab_v73_complex_infinities_preserve_components(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "complex.mat"
+    values = np.array([(1, np.inf), (np.inf, 2), (3, 4)], dtype=[("real", "f4"), ("imag", "f4")])
+    with h5py.File(path, "w") as target:
+        target["values"] = values
+    tensor = open_file(path).tensors["values"]
+    decoded = tensor.read()
+    np.testing.assert_array_equal(decoded.real, values["real"])
+    np.testing.assert_array_equal(decoded.imag, values["imag"])
+    stats = statistics(tensor)
+    assert (stats.infinite, stats.nan, stats.finite) == (2, 0, 1)
+
+
 def test_onnx_inline_and_external(tmp_path):
     onnx = pytest.importorskip("onnx")
     weight = np.arange(32, dtype=np.float32)
@@ -140,9 +155,31 @@ def test_export_preserves_old_output_on_error_and_writes_csv_indices(tmp_path):
     with pytest.raises(TensorViewError, match="range"):
         export_tensor(array_tensor("input", np.array([0, 256])), output, dtype="uint8")
     assert output.read_bytes() == b"old file"
+    assert not list(tmp_path.glob(".tensorview-*"))
     csv = tmp_path / "out.csv"
     export_tensor(source, csv)
     assert csv.read_text().splitlines() == ["axis_0,axis_1,value", "0,0,0", "0,1,1", "1,0,2", "1,1,3"]
+
+
+def test_export_failure_releases_staged_file(tmp_path):
+    source = array_tensor("input", np.array([1 + 1j]))
+    output = tmp_path / "weights.safetensors"
+    output.write_bytes(b"original")
+    with pytest.raises(TensorViewError, match="complex values"):
+        export_tensor(source, output)
+    assert output.read_bytes() == b"original"
+    assert list(tmp_path.iterdir()) == [output]
+
+
+def test_float_to_integer_export_checks_exact_bounds(tmp_path):
+    output = tmp_path / "converted.npy"
+    original = np.array([np.nextafter(float(2**64), 0), 0], dtype=np.float64)
+    export_tensor(array_tensor("values", original), output, dtype="uint64")
+    converted = np.load(output, allow_pickle=False)
+    assert int(converted[0]) == int(original[0])
+    with pytest.raises(TensorViewError, match="range"):
+        export_tensor(array_tensor("invalid", np.array([float(2**64)])), output, dtype="uint64")
+    np.testing.assert_array_equal(np.load(output, allow_pickle=False), converted)
 
 
 def test_report_formats_escape_user_controlled_names(tmp_path):

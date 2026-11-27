@@ -20,6 +20,12 @@ def compact(value):
     return f"{value:.5g}"
 
 
+def value_axis(scale):
+    if scale > 1e100 or scale < 1e-100:
+        return scale, f"Value / {compact(scale)}"
+    return 1.0, "Value"
+
+
 class Chart(pg.PlotWidget):
     def __init__(self, parent=None):
         super().__init__(parent, background=PLOT)
@@ -72,8 +78,10 @@ class Chart(pg.PlotWidget):
         self.showAxis("bottom")
         self.showAxis("left")
         if values.ndim < 2:
-            self._prepare("Index", "Value")
-            values = values.reshape(-1)
+            scale = scale_bounds[0] if scale_bounds else float(np.max(np.abs(finite))) or 1.0
+            divisor, axis_label = value_axis(scale)
+            self._prepare("Index", axis_label)
+            values = values.reshape(-1) / divisor
             x = np.arange(values.size) * (steps[0] if steps else 1)
             self.plot(
                 x, np.where(np.isfinite(values), values, np.nan), pen=pg.mkPen(ACCENT, width=1.6),
@@ -111,13 +119,8 @@ class Chart(pg.PlotWidget):
         self._prepare("Value", "Share")
         self.showAxis("bottom")
         self.showAxis("left")
-        scale = max(float(np.max(np.abs(data))) for _, data, _ in present) or 1.0
-        # Normalizing the histogram edges avoids overflow at finite float64 extremes.
-        axis_label = "Value"
-        if scale > 1e100 or scale < 1e-100:
-            axis_label = f"Value / {compact(scale)}"
-        else:
-            scale = 1.0
+        magnitude = max(float(np.max(np.abs(data))) for _, data, _ in present) or 1.0
+        scale, axis_label = value_axis(magnitude)
         self.setLabel("bottom", axis_label, color=MUTED)
         lower = min(float(data.min() / scale) for _, data, _ in present)
         upper = max(float(data.max() / scale) for _, data, _ in present)

@@ -287,7 +287,11 @@ def _hdf5_reader(dataset, transpose, complex_fields, logical):
             index = tuple(reversed(index))
         value = np.asarray(dataset[index])
         if complex_fields:
-            value = value["real"] + 1j * value["imag"]
+            dtype = np.result_type(value.dtype["real"], value.dtype["imag"], np.complex64)
+            complex_value = np.empty(value.shape, dtype=dtype)
+            complex_value.real = value["real"]
+            complex_value.imag = value["imag"]
+            value = complex_value
         if logical:
             value = value.astype(bool, copy=False)
         return value.T if transpose else value

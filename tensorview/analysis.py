@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from math import frexp, inf, ldexp, sqrt
 
 import numpy as np
 
@@ -21,8 +22,8 @@ class Statistics:
     nan: int
     positive_inf: int
     negative_inf: int
-    minimum: float | None
-    maximum: float | None
+    minimum: int | float | None
+    maximum: int | float | None
     mean: float | None
     median: float | None
     std: float | None
@@ -223,32 +224,64 @@ def _equal(left, right):
     return np.equal(left, right) | (np.isnan(left) & np.isnan(right))
 
 
+def _component_scale(values):
+    scale = float(np.max(np.abs(values.real)))
+    if np.iscomplexobj(values):
+        scale = max(scale, float(np.max(np.abs(values.imag))))
+    return scale
+
+
+def _scaled(values, scale):
+    divisor = scale or 1.0
+    if np.iscomplexobj(values):
+        # Scale components separately to avoid overflow in complex division by subnormal scalars.
+        return values.real / divisor + 1j * (values.imag / divisor)
+    return values / divisor
+
+
 class _Distance:
     def __init__(self):
-        self.scale = 0.0
+        self.left_scale = self.right_scale = self.delta_scale = 0.0
         self.left_squared = self.right_squared = self.delta_squared = 0.0
         self.absolute = self.maximum = self.dot = 0.0
 
-    def add(self, left, right, raw_delta=None):
-        with np.errstate(over="ignore", invalid="ignore"):
-            scale = max(self.scale, float(np.max(np.abs(left.real))), float(np.max(np.abs(right.real))))
-            if np.iscomplexobj(left):
-                scale = max(scale, float(np.max(np.abs(left.imag))), float(np.max(np.abs(right.imag))))
-            if not scale:
-                return
-            ratio = self.scale / scale
-            if raw_delta is None:
+    def add(self, left, right, raw_delta):
+        left_scale = max(self.left_scale, _component_scale(left))
+        right_scale = max(self.right_scale, _component_scale(right))
+        left_ratio = self.left_scale / left_scale if left_scale else 1.0
+        right_ratio = self.right_scale / right_scale if right_scale else 1.0
+
+        if raw_delta is None:
+            with np.errstate(over="ignore"):
                 raw_delta = left - right
-            left = left / scale
-            right = right / scale
-            delta = np.abs(np.where(np.isfinite(raw_delta), raw_delta / scale, left - right))
-            self.left_squared = self.left_squared * ratio**2 + float(np.square(np.abs(left)).sum())
-            self.right_squared = self.right_squared * ratio**2 + float(np.square(np.abs(right)).sum())
-            self.delta_squared = self.delta_squared * ratio**2 + float(np.square(delta).sum())
-            self.dot = self.dot * ratio**2 + float(np.vdot(left, right).real)
-            self.absolute = self.absolute * ratio + float(delta.sum())
-            self.maximum = max(self.maximum * ratio, float(delta.max()))
-            self.scale = scale
+        if np.isfinite(raw_delta).all():
+            delta_scale = max(self.delta_scale, _component_scale(raw_delta))
+            delta = np.abs(_scaled(raw_delta, delta_scale))
+        else:
+            # A finite pair can have a difference larger than float64 can hold.
+            delta_scale = max(self.delta_scale, left_scale, right_scale)
+            delta = np.abs(_scaled(left, delta_scale) - _scaled(right, delta_scale))
+        delta_ratio = self.delta_scale / delta_scale if delta_scale else 1.0
+
+        left, right = _scaled(left, left_scale), _scaled(right, right_scale)
+        self.left_squared = self.left_squared * left_ratio**2 + float(np.square(np.abs(left)).sum())
+        self.right_squared = self.right_squared * right_ratio**2 + float(np.square(np.abs(right)).sum())
+        self.dot = self.dot * (left_ratio * right_ratio) + float(np.vdot(left, right).real)
+        self.delta_squared = self.delta_squared * delta_ratio**2 + float(np.square(delta).sum())
+        self.absolute = self.absolute * delta_ratio + float(delta.sum())
+        self.maximum = max(self.maximum * delta_ratio, float(delta.max()))
+        self.left_scale, self.right_scale, self.delta_scale = left_scale, right_scale, delta_scale
+
+    def relative_l2(self):
+        if not self.delta_scale:
+            return 0.0
+        left_fraction, left_exponent = frexp(self.left_scale)
+        delta_fraction, delta_exponent = frexp(self.delta_scale)
+        fraction = (delta_fraction / left_fraction) * sqrt(self.delta_squared / self.left_squared)
+        try:
+            return ldexp(fraction, delta_exponent - left_exponent)
+        except OverflowError:
+            return inf
 
 
 def _integer_delta(a, b):
@@ -257,12 +290,45 @@ def _integer_delta(a, b):
         offset = np.uint64(1 << 63)
         a = a.astype(np.int64).view(np.uint64) ^ offset
         b = b.astype(np.int64).view(np.uint64) ^ offset
-    elif a.dtype.kind in "bu" and b.dtype.kind in "bu":
-        a, b = a.astype(np.uint64), b.astype(np.uint64)
+    elif "i" in (a.dtype.kind, b.dtype.kind):
+        signed, unsigned = (a, b) if a.dtype.kind == "i" else (b, a)
+        negative = signed < 0
+        a = np.where(negative, 0, signed).astype(np.uint64)
+        b = unsigned.astype(np.uint64)
+        delta = (np.maximum(a, b) - np.minimum(a, b)).astype(np.float64)
+        delta[negative] += np.abs(signed[negative].astype(np.float64))
+        return delta
     else:
-        return None
+        a, b = a.astype(np.uint64), b.astype(np.uint64)
     return (np.maximum(a, b) - np.minimum(a, b)).astype(np.float64)
 
+
+def _integer_float_delta(integer, floating):
+    real = floating.real.astype(np.float64, copy=False)
+    delta = integer.astype(np.float64) - real
+    if integer.dtype.itemsize == 8:
+        wide = (integer > 2**53) | (integer < -(2**53)) if integer.dtype.kind == "i" else integer > 2**53
+        if np.any(wide):
+            # Both halves convert exactly. Subtract the float before adding the low bits.
+            values = integer[wide]
+            high = (values >> 32).astype(np.float64) * 2**32
+            low = (values & 0xffffffff).astype(np.float64)
+            delta[wide] = (high - real[wide]) + low
+    if np.iscomplexobj(floating):
+        complex_delta = delta.astype(np.complex128)
+        complex_delta.imag = -floating.imag
+        return complex_delta
+    return delta
+
+
+def _precise_delta(a, b):
+    a_integer = a.dtype.kind in "bui"
+    b_integer = b.dtype.kind in "bui"
+    if a_integer and b_integer:
+        return _integer_delta(a, b)
+    if a_integer or b_integer:
+        return _integer_float_delta(a, b) if a_integer else _integer_float_delta(b, a)
+    return None
 
 def compare_tensor(
     name: str, left: Tensor | None, right: Tensor | None, poll: Callable[[], None] | None = None,
@@ -289,7 +355,7 @@ def compare_tensor(
         a, b = a[finite], b[finite]
         if a.size:
             pairs += a.size
-            distance.add(a.astype(dtype, copy=False), b.astype(dtype, copy=False), _integer_delta(a, b))
+            distance.add(a.astype(dtype, copy=False), b.astype(dtype, copy=False), _precise_delta(a, b))
     result.changed_values = changed
     result.finite_pairs = pairs
     result.status = "Modified" if changed else "Identical"
@@ -297,10 +363,10 @@ def compare_tensor(
         result.status = "Modified" if changed else "Dtype changed"
         result.detail = "Data type changed."
     if pairs:
-        result.mean_absolute = distance.absolute / pairs * distance.scale
-        result.max_absolute = distance.maximum * distance.scale
+        result.mean_absolute = distance.absolute / pairs * distance.delta_scale
+        result.max_absolute = distance.maximum * distance.delta_scale
         if distance.left_squared:
-            result.relative_l2 = (distance.delta_squared / distance.left_squared) ** 0.5
+            result.relative_l2 = distance.relative_l2()
         if not changed and not distance.left_squared:
             result.relative_l2 = 0.0
         if distance.left_squared and distance.right_squared:

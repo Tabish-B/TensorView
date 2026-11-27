@@ -19,6 +19,8 @@ python -m pip install -e '.[torch,scientific,embeddings]'
 tensorview
 ```
 
+On Ubuntu, install the Qt runtime libraries with `sudo apt-get install libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0`. Other Linux distributions provide equivalent packages.
+
 A base install, `python -m pip install -e .`, supports NumPy and SafeTensors. Add `torch` for PyTorch, `scientific` for HDF5, ONNX and MATLAB, and `embeddings` for projections. A CPU-only PyTorch build is sufficient. To skip the built-in examples or open local files from the terminal, use `tensorview --empty` or `tensorview model.safetensors`.
 
 ## Explore a checkpoint

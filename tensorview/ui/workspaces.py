@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QSplitter, QStackedWidget, QVBoxLayout, QWidget
 
 from ..analysis import compare, plot_slice, statistics, validate
 from ..exporting import comparison_report, validation_report
-from .charts import BASELINE_COLOR, CANDIDATE_COLOR, Chart, compact
+from .charts import BASELINE_COLOR, CANDIDATE_COLOR, Chart, compact, value_axis
 from .theme import ComboBox, button, label
 from .widgets import Grid, metric, panel, row, shape_text, wrapped
 
@@ -278,9 +278,10 @@ class Comparison(Workspace):
         bounds = tuple(np.percentile(combined, [1, 99])) if combined.size else None
         if bounds is not None and bounds[0] == bounds[1]:
             bounds = None
+        divisor, _ = value_axis(scale)
         finite_ranges = None if not finite_values else (
-            min(float(values.min()) for values in finite_values),
-            max(float(values.max()) for values in finite_values),
+            min(float(values.min()) / divisor for values in finite_values),
+            max(float(values.max()) / divisor for values in finite_values),
         )
         for chart, data in zip(self.side_charts, series, strict=True):
             if data is None:

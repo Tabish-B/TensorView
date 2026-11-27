@@ -4,6 +4,7 @@ import csv
 import html
 import json
 import math
+import mmap
 import os
 import tempfile
 from collections.abc import Iterator
@@ -62,12 +63,10 @@ def export_tensor(
         else:
             with tempfile.TemporaryDirectory(prefix="tensorview-export-", dir=path.parent) as workspace:
                 staged = Path(workspace) / "tensor.npy"
-                _stage(tensor, staged, target_dtype, axes, source_shape, shape)
-                array = np.load(staged, mmap_mode="c", allow_pickle=False)
-                try:
+                offset = _stage(tensor, staged, target_dtype, axes, source_shape, shape)
+                with staged.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_COPY) as mapped:
+                    array = np.ndarray(shape, dtype=target_dtype, buffer=mapped, offset=offset)
                     _write_array(destination, suffix, array, tensor.name)
-                finally:
-                    del array
 
 
 def _resolve_shape(shape, size):
@@ -85,36 +84,46 @@ def _resolve_shape(shape, size):
 
 def _stage(tensor, path, dtype, axes, source_shape, destination_shape):
     inverse = np.argsort(axes)
-    array = np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=destination_shape)
-    flat = array.reshape(-1)
-    offset = 0
-    for index in block_indices(source_shape):
-        logical_index = tuple(index[axis] for axis in inverse)
-        remaining = [axis for axis, item in enumerate(logical_index) if isinstance(item, slice)]
-        permutation = tuple(remaining.index(axes[i]) for i, item in enumerate(index) if isinstance(item, slice))
-        values = tensor.read(logical_index).transpose(permutation).reshape(-1)
-        if values.dtype.kind == "c" and dtype.kind != "c":
-            raise TensorViewError("Choose a complex dtype to preserve the imaginary component.")
-        if dtype.kind in "iu":
-            info = np.iinfo(dtype)
-            if values.dtype.kind == "f":
-                truncated = np.trunc(values)
-                invalid = ~np.isfinite(values) | (truncated < int(info.min)) | (truncated >= int(info.max) + 1)
-            elif values.dtype.kind in "iu" and not np.can_cast(values.dtype, dtype, casting="safe"):
-                lower = max(int(info.min), int(np.iinfo(values.dtype).min))
-                upper = min(int(info.max), int(np.iinfo(values.dtype).max))
-                invalid = (values < lower) | (values > upper) if lower <= upper else values.size > 0
-            else:
-                invalid = False
-            if np.any(invalid):
-                raise TensorViewError(f"Values exceed the range of {dtype} or include NaN or infinity.")
-        try:
-            with np.errstate(over="raise", invalid="raise"):
-                flat[offset:offset + values.size] = values
-        except FloatingPointError as error:
-            raise TensorViewError(f"Values exceed the range of {dtype}.") from error
-        offset += values.size
-    array.flush()
+    header = {
+        "descr": np.lib.format.dtype_to_descr(dtype),
+        "fortran_order": False,
+        "shape": destination_shape,
+    }
+    with path.open("wb") as stream:
+        np.lib.format.write_array_header_2_0(stream, header)
+        offset = stream.tell()
+        for index in block_indices(source_shape):
+            logical_index = tuple(index[axis] for axis in inverse)
+            remaining = [axis for axis, item in enumerate(logical_index) if isinstance(item, slice)]
+            permutation = tuple(remaining.index(axes[i]) for i, item in enumerate(index) if isinstance(item, slice))
+            values = tensor.read(logical_index).transpose(permutation).reshape(-1)
+            if values.dtype.kind == "c" and dtype.kind != "c":
+                raise TensorViewError("Choose a complex dtype to preserve the imaginary component.")
+            if dtype.kind in "iu":
+                _check_integer_range(values, dtype)
+            try:
+                with np.errstate(over="raise", invalid="raise"):
+                    converted = values.astype(dtype, copy=False)
+            except FloatingPointError as error:
+                raise TensorViewError(f"Values exceed the range of {dtype}.") from error
+            stream.write(converted.tobytes())
+    return offset
+
+
+def _check_integer_range(values, dtype):
+    info = np.iinfo(dtype)
+    if values.dtype.kind == "f":
+        truncated = np.trunc(values.astype(np.float64, copy=False))
+        invalid = ~np.isfinite(truncated) | (truncated < float(info.min)) | (truncated >= float(int(info.max) + 1))
+    elif values.dtype.kind in "iu" and not np.can_cast(values.dtype, dtype, casting="safe"):
+        source = np.iinfo(values.dtype)
+        lower = max(int(info.min), int(source.min))
+        upper = min(int(info.max), int(source.max))
+        invalid = (values < lower) | (values > upper)
+    else:
+        return
+    if np.any(invalid):
+        raise TensorViewError(f"Values exceed the range of {dtype} or include NaN or infinity.")
 
 
 def _write_array(path, suffix, array, name):

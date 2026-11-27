@@ -91,6 +91,14 @@ def test_inspect_compare_validate_and_open_file(tmp_path):
         wait_for(app, lambda: inspector.stats is not None and inspector.source.path == path.resolve())
         assert inspector.stats.nan == 1
         assert window.pages.currentWidget() is inspector
+        extreme = tmp_path / "extreme.npy"
+        np.save(extreme, [-1e308, 1e308])
+        window.load_paths([extreme])
+        wait_for(app, lambda: inspector.active_chart is not None and inspector.source.path == extreme.resolve())
+        app.processEvents()
+        lower, upper = inspector.chart.viewRange()[1]
+        assert -2 < lower < -0.9 and 0.9 < upper < 2
+        assert "Value /" in inspector.chart.getAxis("left").labelText
     finally:
         window.close()
         wait_for(app, lambda: not window.isVisible())
